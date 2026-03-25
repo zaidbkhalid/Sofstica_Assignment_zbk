@@ -15,16 +15,28 @@ def normalize_bool(value):
 
 
 def main():
-    # Create tables
     Base.metadata.create_all(bind=engine)
 
     df = pd.read_csv("github_stars.csv")
     df.columns = [col.strip().lower() for col in df.columns]
 
+    required = {
+        "rank",
+        "namewithowner",
+        "stars",
+        "language",
+        "isarchived",
+        "isfork",
+        "createdat",
+    }
+
+    missing = required - set(df.columns)
+    if missing:
+        raise ValueError(f"Missing required columns in github_stars.csv: {sorted(missing)}")
+
     session = SessionLocal()
 
     try:
-        # Clear existing data
         session.execute(delete(RepositoryMeta))
         session.execute(delete(RepositoryCore))
 
@@ -37,14 +49,12 @@ def main():
 
             meta = RepositoryMeta(
                 rank=int(row["rank"]),
-                language=None if pd.isna(row["language"]) else str(row["language"]).strip(),
+                language=None if pd.isna(row["language"]) or str(row["language"]).strip() == "" else str(row["language"]).strip(),
                 isarchived=normalize_bool(row["isarchived"]),
                 isfork=normalize_bool(row["isfork"])
             )
 
-            # link both
             core.meta = meta
-
             session.add(core)
 
         session.commit()
@@ -52,7 +62,7 @@ def main():
 
     except Exception as e:
         session.rollback()
-        print("❌ Error:", e)
+        raise RuntimeError(f"Import failed: {e}") from e
 
     finally:
         session.close()

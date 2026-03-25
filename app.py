@@ -16,7 +16,7 @@ def index():
             select(RepositoryCore)
             .join(RepositoryMeta)
             .order_by(RepositoryCore.stars.desc())
-            .limit(50)
+            .limit(10000)
         )
 
         repos = session.execute(stmt).scalars().all()
