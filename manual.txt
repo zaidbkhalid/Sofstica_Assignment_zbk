@@ -1,0 +1,4 @@
+Step 1 — Update your system first
+bashsudo apt update && sudo apt upgrade -y
+
+

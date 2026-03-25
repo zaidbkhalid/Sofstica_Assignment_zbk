@@ -1,0 +1,6 @@
+requests
+flask
+sqlalchemy
+psycopg2-binary
+pandas
+python-dateutilS
