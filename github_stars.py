@@ -16,7 +16,7 @@ import requests
 TOKEN = os.environ.get("GITHUB_TOKEN", "")
 GRAPHQL_URL = "https://api.github.com/graphql"
 
-TOTAL_REPOS = 25_000
+TOTAL_REPOS = 50_000
 PAGE_SIZE = 100
 MAX_WORKERS = 4
 INTER_REQUEST_DELAY = 0.25
@@ -189,7 +189,7 @@ class ProgressStore:
         out = []
         for shard in shards:
             status = self.state["shards"].get(shard, {}).get("status", "pending")
-            if status != "done":
+            if status in {"pending", "paused", "running"}:
                 out.append(shard)
         return out
 
@@ -366,6 +366,7 @@ def crawl_shard(
     progress.update_shard(shard_query, status="running", cursor=cursor)
 
     count = 0
+    exhausted = False
 
     while not stop_event.is_set():
         data = gql_request(shard_query, cursor)
@@ -402,17 +403,23 @@ def crawl_shard(
 
         rate_limiter.maybe_wait()
 
-        if stop_event.is_set() or not page_info["hasNextPage"]:
+        if not page_info["hasNextPage"]:
+            exhausted = True
+            break
+
+        if stop_event.is_set():
             break
 
         cursor = page_info["endCursor"]
         progress.update_shard(shard_query, status="running", cursor=cursor)
         time.sleep(INTER_REQUEST_DELAY)
 
-    final_status = "done" if not stop_event.is_set() or progress.get_written() >= TOTAL_REPOS else "paused"
-    progress.update_shard(shard_query, status=final_status, cursor=cursor)
-    progress.save()
+    if exhausted:
+        progress.update_shard(shard_query, status="done", cursor=cursor)
+    else:
+        progress.update_shard(shard_query, status="paused", cursor=cursor)
 
+    progress.save()
     return count
 
 
