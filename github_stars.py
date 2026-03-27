@@ -1,11 +1,12 @@
 import os
 import sys
 import csv
+import json
 import time
 import queue
 import random
 import threading
-from dataclasses import dataclass
+from dataclasses import dataclass, asdict
 from datetime import datetime, timezone
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
@@ -15,14 +16,17 @@ import requests
 TOKEN = os.environ.get("GITHUB_TOKEN", "")
 GRAPHQL_URL = "https://api.github.com/graphql"
 
-TOTAL_REPOS = 10_000
+TOTAL_REPOS = 25_000
 PAGE_SIZE = 100
 MAX_WORKERS = 4
 INTER_REQUEST_DELAY = 0.25
 MIN_POINTS_LEFT = 250
 MAX_RETRIES = 5
 BASE_BACKOFF = 2.0
+
 OUTPUT_CSV = "github_stars.csv"
+STATE_FILE = "crawl_state.json"
+SEEN_FILE = "seen_repos.json"
 PRINT_EVERY = 500
 
 HEADERS = {
@@ -58,7 +62,6 @@ query($after: String, $q: String!, $first: Int!) {
 }
 """
 
-# Initial shards. If any shard is still too large, we split it automatically.
 INITIAL_STAR_SHARDS = [
     "stars:>=500000",
     "stars:100000..499999",
@@ -78,6 +81,7 @@ INITIAL_STAR_SHARDS = [
 
 @dataclass(frozen=True)
 class RepoRow:
+    rank: int
     namewithowner: str
     stars: int
     language: str
@@ -117,6 +121,95 @@ class RateLimiter:
 
 
 rate_limiter = RateLimiter()
+
+
+class ProgressStore:
+    def __init__(self, state_file: str, seen_file: str) -> None:
+        self.state_file = state_file
+        self.seen_file = seen_file
+        self.lock = threading.Lock()
+
+        self.state = {
+            "mode": "discovering",
+            "written": 0,
+            "leaf_shards": [],
+            "shards": {},
+        }
+        self.seen = set()
+
+    def load(self) -> None:
+        if os.path.exists(self.state_file):
+            with open(self.state_file, "r", encoding="utf-8") as fh:
+                self.state = json.load(fh)
+
+        if os.path.exists(self.seen_file):
+            with open(self.seen_file, "r", encoding="utf-8") as fh:
+                seen_list = json.load(fh)
+                self.seen = set(seen_list)
+
+    def save(self) -> None:
+        with self.lock:
+            with open(self.state_file, "w", encoding="utf-8") as fh:
+                json.dump(self.state, fh, indent=2)
+
+            with open(self.seen_file, "w", encoding="utf-8") as fh:
+                json.dump(sorted(self.seen), fh)
+
+    def set_mode(self, mode: str) -> None:
+        with self.lock:
+            self.state["mode"] = mode
+        self.save()
+
+    def set_leaf_shards(self, shards: list[str]) -> None:
+        with self.lock:
+            self.state["leaf_shards"] = shards
+            for shard in shards:
+                if shard not in self.state["shards"]:
+                    self.state["shards"][shard] = {
+                        "status": "pending",
+                        "cursor": None,
+                    }
+        self.save()
+
+    def update_shard(self, shard: str, status: str | None = None, cursor: str | None = None) -> None:
+        with self.lock:
+            if shard not in self.state["shards"]:
+                self.state["shards"][shard] = {"status": "pending", "cursor": None}
+            if status is not None:
+                self.state["shards"][shard]["status"] = status
+            if cursor is not None or cursor is None:
+                self.state["shards"][shard]["cursor"] = cursor
+        self.save()
+
+    def get_shard_cursor(self, shard: str) -> str | None:
+        return self.state["shards"].get(shard, {}).get("cursor")
+
+    def get_pending_shards(self) -> list[str]:
+        shards = self.state.get("leaf_shards", [])
+        out = []
+        for shard in shards:
+            status = self.state["shards"].get(shard, {}).get("status", "pending")
+            if status != "done":
+                out.append(shard)
+        return out
+
+    def add_seen(self, name: str) -> bool:
+        with self.lock:
+            if name in self.seen:
+                return False
+            self.seen.add(name)
+            return True
+
+    def increment_written(self) -> int:
+        with self.lock:
+            self.state["written"] += 1
+            return self.state["written"]
+
+    def get_written(self) -> int:
+        return int(self.state.get("written", 0))
+
+
+progress = ProgressStore(STATE_FILE, SEEN_FILE)
 
 
 def gql_request(search_query: str, cursor: str | None = None, attempt: int = 0) -> dict:
@@ -193,38 +286,85 @@ def split_shard(q: str) -> list[str]:
 
 
 def discover_leaf_shards(initial_shards: list[str]) -> list[str]:
+    if progress.state.get("mode") == "crawling" and progress.state.get("leaf_shards"):
+        print("[info] Reusing previously discovered leaf shards.", file=sys.stderr)
+        return progress.state["leaf_shards"]
+
+    progress.set_mode("discovering")
+
     pending = list(initial_shards)
     leaves: list[str] = []
 
     while pending:
         shard = pending.pop(0)
+        print(f"[discover] checking shard: {shard}", file=sys.stderr)
+
         data = gql_request(shard, None)
         time.sleep(INTER_REQUEST_DELAY)
 
         count = data["search"]["repositoryCount"]
+        print(f"[discover] repositoryCount={count} for shard {shard}", file=sys.stderr)
 
         if count > 1000:
             parts = split_shard(shard)
             if parts == [shard]:
                 leaves.append(shard)
             else:
+                print(f"[discover] splitting {shard} into {parts}", file=sys.stderr)
                 pending.extend(parts)
         else:
             leaves.append(shard)
 
         rate_limiter.maybe_wait()
 
+    progress.set_leaf_shards(leaves)
+    progress.set_mode("crawling")
     return leaves
+
+
+def load_existing_rows() -> None:
+    """
+    If CSV already exists, restore state from it when possible.
+    This keeps resume behavior sane even after interruption.
+    """
+    if not os.path.exists(OUTPUT_CSV):
+        return
+
+    # If state already knows written > 0, trust state.
+    if progress.get_written() > 0:
+        return
+
+    written = 0
+    with open(OUTPUT_CSV, "r", newline="", encoding="utf-8") as fh:
+        reader = csv.DictReader(fh)
+        for row in reader:
+            name = row["nameWithOwner"].strip()
+            progress.seen.add(name)
+            written += 1
+
+    progress.state["written"] = written
+    progress.save()
+
+
+def ensure_csv_header() -> None:
+    if os.path.exists(OUTPUT_CSV):
+        return
+
+    with open(OUTPUT_CSV, "w", newline="", encoding="utf-8") as fh:
+        writer = csv.writer(fh)
+        writer.writerow(
+            ["rank", "nameWithOwner", "stars", "language", "isArchived", "isFork", "createdAt"]
+        )
 
 
 def crawl_shard(
     shard_query: str,
     target_queue: "queue.Queue[RepoRow]",
-    seen: set[str],
-    seen_lock: threading.Lock,
     stop_event: threading.Event,
 ) -> int:
-    cursor = None
+    cursor = progress.get_shard_cursor(shard_query)
+    progress.update_shard(shard_query, status="running", cursor=cursor)
+
     count = 0
 
     while not stop_event.is_set():
@@ -237,8 +377,15 @@ def crawl_shard(
             if stop_event.is_set():
                 break
 
+            name = repo["nameWithOwner"]
+            added = progress.add_seen(name)
+            if not added:
+                continue
+
+            rank = progress.increment_written()
             row = RepoRow(
-                namewithowner=repo["nameWithOwner"],
+                rank=rank,
+                namewithowner=name,
                 stars=repo["stargazerCount"],
                 language=(repo.get("primaryLanguage") or {}).get("name", ""),
                 isarchived=repo["isArchived"],
@@ -246,13 +393,12 @@ def crawl_shard(
                 createdat=repo["createdAt"],
             )
 
-            with seen_lock:
-                if row.namewithowner in seen:
-                    continue
-                seen.add(row.namewithowner)
-
             target_queue.put(row)
             count += 1
+
+            if rank >= TOTAL_REPOS:
+                stop_event.set()
+                break
 
         rate_limiter.maybe_wait()
 
@@ -260,7 +406,12 @@ def crawl_shard(
             break
 
         cursor = page_info["endCursor"]
+        progress.update_shard(shard_query, status="running", cursor=cursor)
         time.sleep(INTER_REQUEST_DELAY)
+
+    final_status = "done" if not stop_event.is_set() or progress.get_written() >= TOTAL_REPOS else "paused"
+    progress.update_shard(shard_query, status=final_status, cursor=cursor)
+    progress.save()
 
     return count
 
@@ -276,13 +427,9 @@ def print_header() -> None:
 def writer_thread_fn(
     out_q: "queue.Queue[RepoRow]",
     stop_event: threading.Event,
-    total_counter: dict,
 ) -> None:
-    with open(OUTPUT_CSV, "w", newline="", encoding="utf-8") as fh:
+    with open(OUTPUT_CSV, "a", newline="", encoding="utf-8") as fh:
         writer = csv.writer(fh)
-        writer.writerow(
-            ["rank", "nameWithOwner", "stars", "language", "isArchived", "isFork", "createdAt"]
-        )
 
         while not stop_event.is_set() or not out_q.empty():
             try:
@@ -290,11 +437,8 @@ def writer_thread_fn(
             except queue.Empty:
                 continue
 
-            total_counter["written"] += 1
-            rank = total_counter["written"]
-
             writer.writerow([
-                rank,
+                row.rank,
                 row.namewithowner,
                 row.stars,
                 row.language,
@@ -302,17 +446,21 @@ def writer_thread_fn(
                 row.isfork,
                 row.createdat,
             ])
+            fh.flush()
 
-            if rank == 1 or rank % PRINT_EVERY == 0:
+            if row.rank == 1 or row.rank % PRINT_EVERY == 0:
                 archived = "yes" if row.isarchived else "no"
                 fork = "yes" if row.isfork else "no"
                 print(
-                    f"{rank:>7}  {row.namewithowner:<45.45}  "
+                    f"{row.rank:>7}  {row.namewithowner:<45.45}  "
                     f"{row.stars:>9,}  {row.language:<16}  "
                     f"{archived:<8}  {fork:<5}  {row.createdat[:10]}"
                 )
 
-            if total_counter["written"] >= TOTAL_REPOS:
+            if row.rank % 100 == 0:
+                progress.save()
+
+            if row.rank >= TOTAL_REPOS:
                 stop_event.set()
 
 
@@ -322,45 +470,55 @@ def main() -> None:
 
     started = time.time()
 
+    progress.load()
+    ensure_csv_header()
+    load_existing_rows()
+
     print(f"Fetching star counts for up to {TOTAL_REPOS:,} GitHub repos ...")
-    print(f"Results will also be saved to: {OUTPUT_CSV}")
+    print(f"Results will be saved to: {OUTPUT_CSV}")
+    print(f"Checkpoint state: {STATE_FILE}")
     print_header()
 
-    print("\nDiscovering shards ...", file=sys.stderr)
     leaf_shards = discover_leaf_shards(INITIAL_STAR_SHARDS)
     print(f"[info] Using {len(leaf_shards)} leaf shards", file=sys.stderr)
 
+    pending_shards = progress.get_pending_shards()
+    print(f"[info] Pending shards to crawl: {len(pending_shards)}", file=sys.stderr)
+    print(f"[info] Already written: {progress.get_written()}", file=sys.stderr)
+
+    if progress.get_written() >= TOTAL_REPOS:
+        print("[info] Target already reached. Nothing to do.", file=sys.stderr)
+        return
+
     out_q: "queue.Queue[RepoRow]" = queue.Queue(maxsize=5000)
     stop_event = threading.Event()
-    total_counter = {"written": 0}
-    seen: set[str] = set()
-    seen_lock = threading.Lock()
 
     writer = threading.Thread(
         target=writer_thread_fn,
-        args=(out_q, stop_event, total_counter),
+        args=(out_q, stop_event),
         daemon=True,
     )
     writer.start()
 
     with ThreadPoolExecutor(max_workers=MAX_WORKERS) as pool:
         futures = [
-            pool.submit(crawl_shard, shard, out_q, seen, seen_lock, stop_event)
-            for shard in leaf_shards
+            pool.submit(crawl_shard, shard, out_q, stop_event)
+            for shard in pending_shards
         ]
 
         for fut in as_completed(futures):
             fut.result()
-            if total_counter["written"] >= TOTAL_REPOS:
+            if progress.get_written() >= TOTAL_REPOS:
                 stop_event.set()
                 break
 
     stop_event.set()
     writer.join()
+    progress.save()
 
     elapsed = time.time() - started
     print("-" * 115)
-    print(f"\nDone. {total_counter['written']:,} repos written to {OUTPUT_CSV}.")
+    print(f"\nDone. {progress.get_written():,} repos written to {OUTPUT_CSV}.")
     print(f"Elapsed time: {elapsed/60:.1f} minutes.")
 
 
