@@ -1,7 +1,7 @@
 from datetime import datetime
 from typing import Optional
 
-from sqlalchemy import Boolean, DateTime, ForeignKey, Index, Integer, String
+from sqlalchemy import Boolean, DateTime, ForeignKey, Index, Integer, String, Text, func
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from db import Base
@@ -20,7 +20,7 @@ class RepositoryCore(Base):
         "RepositoryMeta",
         back_populates="core",
         uselist=False,
-        cascade="all, delete-orphan"
+        cascade="all, delete-orphan",
     )
 
     __table_args__ = (
@@ -34,7 +34,7 @@ class RepositoryMeta(Base):
     id: Mapped[int] = mapped_column(
         Integer,
         ForeignKey("repositories_core.id"),
-        primary_key=True
+        primary_key=True,
     )
 
     rank: Mapped[int] = mapped_column(Integer, nullable=False, index=True)
@@ -44,10 +44,25 @@ class RepositoryMeta(Base):
 
     core: Mapped["RepositoryCore"] = relationship(
         "RepositoryCore",
-        back_populates="meta"
+        back_populates="meta",
     )
 
     __table_args__ = (
         Index("ix_meta_language", "language"),
         Index("ix_meta_archived_fork", "isarchived", "isfork"),
+    )
+
+
+class CrawlShardProgress(Base):
+    __tablename__ = "crawl_shard_progress"
+
+    shard_key: Mapped[str] = mapped_column(String(128), primary_key=True)
+    status: Mapped[str] = mapped_column(String(20), nullable=False, default="pending", index=True)
+    cursor: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    discovered_count: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+        onupdate=func.now(),
     )
