@@ -1,69 +1,429 @@
 <!DOCTYPE html>
-<html>
+<html lang="en">
 <head>
-    <title>GitHub Repositories</title>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>GitHub Repository Crawler</title>
     <style>
+        :root {
+            --bg: #f6f8fb;
+            --card: #ffffff;
+            --text: #1f2937;
+            --muted: #6b7280;
+            --border: #e5e7eb;
+            --header: #111827;
+            --accent: #2563eb;
+            --accent-soft: #dbeafe;
+            --success-soft: #dcfce7;
+            --warning-soft: #fef3c7;
+            --shadow: 0 10px 25px rgba(0, 0, 0, 0.06);
+        }
+
+        * {
+            box-sizing: border-box;
+        }
+
         body {
-            font-family: Arial;
-            margin: 20px;
-            background: #f5f5f5;
+            margin: 0;
+            font-family: Arial, sans-serif;
+            background: var(--bg);
+            color: var(--text);
         }
-        table {
-            border-collapse: collapse;
-            width: 100%;
-            background: white;
-            margin-bottom: 30px;
+
+        .container {
+            max-width: 1400px;
+            margin: 0 auto;
+            padding: 28px;
         }
-        th, td {
-            padding: 10px;
-            border: 1px solid #ddd;
-        }
-        th {
-            background: #333;
+
+        .hero {
+            background: linear-gradient(135deg, #111827, #1f2937);
             color: white;
+            border-radius: 16px;
+            padding: 28px;
+            box-shadow: var(--shadow);
+            margin-bottom: 22px;
+        }
+
+        .hero h1 {
+            margin: 0 0 8px 0;
+            font-size: 30px;
+        }
+
+        .hero p {
+            margin: 0;
+            color: #d1d5db;
+            font-size: 15px;
+        }
+
+        .stats {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+            gap: 16px;
+            margin-bottom: 22px;
+        }
+
+        .stat-card {
+            background: var(--card);
+            border: 1px solid var(--border);
+            border-radius: 14px;
+            padding: 18px;
+            box-shadow: var(--shadow);
+        }
+
+        .stat-label {
+            font-size: 13px;
+            color: var(--muted);
+            margin-bottom: 8px;
+        }
+
+        .stat-value {
+            font-size: 26px;
+            font-weight: bold;
+        }
+
+        .panel {
+            background: var(--card);
+            border: 1px solid var(--border);
+            border-radius: 16px;
+            box-shadow: var(--shadow);
+            overflow: hidden;
+        }
+
+        .panel-header {
+            padding: 18px 20px;
+            border-bottom: 1px solid var(--border);
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            gap: 16px;
+            flex-wrap: wrap;
+        }
+
+        .panel-title {
+            font-size: 20px;
+            font-weight: bold;
+            margin: 0;
+        }
+
+        .panel-subtitle {
+            font-size: 13px;
+            color: var(--muted);
+            margin-top: 4px;
+        }
+
+        .filters {
+            padding: 18px 20px;
+            border-bottom: 1px solid var(--border);
+            display: flex;
+            gap: 12px;
+            flex-wrap: wrap;
+            align-items: end;
+        }
+
+        .field-group {
+            display: flex;
+            flex-direction: column;
+            gap: 6px;
+            min-width: 220px;
+        }
+
+        label {
+            font-size: 13px;
+            color: var(--muted);
+        }
+
+        input[type="text"],
+        select {
+            padding: 10px 12px;
+            border: 1px solid var(--border);
+            border-radius: 10px;
+            font-size: 14px;
+            background: white;
+        }
+
+        .btn {
+            padding: 10px 14px;
+            border: none;
+            border-radius: 10px;
+            background: var(--accent);
+            color: white;
+            font-weight: bold;
+            cursor: pointer;
+        }
+
+        .btn-secondary {
+            background: #e5e7eb;
+            color: #111827;
+            text-decoration: none;
+            display: inline-flex;
+            align-items: center;
+        }
+
+        .table-wrap {
+            overflow-x: auto;
+        }
+
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            background: white;
+        }
+
+        thead th {
+            position: sticky;
+            top: 0;
+            background: #f9fafb;
+            color: #374151;
+            font-size: 13px;
+            text-transform: uppercase;
+            letter-spacing: 0.03em;
+            border-bottom: 1px solid var(--border);
+            padding: 14px 12px;
+            text-align: left;
+            white-space: nowrap;
+        }
+
+        tbody td {
+            padding: 14px 12px;
+            border-bottom: 1px solid var(--border);
+            vertical-align: top;
+            font-size: 14px;
+        }
+
+        tbody tr:hover {
+            background: #f9fbff;
+        }
+
+        .repo-name {
+            font-weight: bold;
+            color: #111827;
+        }
+
+        .muted {
+            color: var(--muted);
+            font-size: 13px;
+        }
+
+        .badge {
+            display: inline-block;
+            padding: 5px 10px;
+            border-radius: 999px;
+            font-size: 12px;
+            font-weight: bold;
+            white-space: nowrap;
+        }
+
+        .badge-archived {
+            background: var(--warning-soft);
+            color: #92400e;
+        }
+
+        .badge-fork {
+            background: var(--accent-soft);
+            color: #1d4ed8;
+        }
+
+        .badge-no {
+            background: #f3f4f6;
+            color: #4b5563;
+        }
+
+        .pagination {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            gap: 12px;
+            padding: 18px 20px;
+            flex-wrap: wrap;
+        }
+
+        .pagination-info {
+            color: var(--muted);
+            font-size: 14px;
+        }
+
+        .pagination-links {
+            display: flex;
+            gap: 8px;
+            flex-wrap: wrap;
+        }
+
+        .page-link {
+            padding: 10px 14px;
+            border-radius: 10px;
+            border: 1px solid var(--border);
+            background: white;
+            text-decoration: none;
+            color: var(--text);
+            font-size: 14px;
+        }
+
+        .page-link:hover {
+            border-color: var(--accent);
+            color: var(--accent);
+        }
+
+        .empty-state {
+            padding: 36px 20px;
+            text-align: center;
+            color: var(--muted);
+        }
+
+        @media (max-width: 900px) {
+            .container {
+                padding: 16px;
+            }
+
+            .hero h1 {
+                font-size: 24px;
+            }
+
+            .filters {
+                flex-direction: column;
+                align-items: stretch;
+            }
+
+            .field-group {
+                min-width: 100%;
+            }
         }
     </style>
 </head>
 <body>
+    <div class="container">
+        <div class="hero">
+            <h1>GitHub Repository Crawler Dashboard</h1>
+            <p>
+                Clean view of crawled repositories stored in PostgreSQL, with filtering, search, and pagination.
+            </p>
+        </div>
 
-<h2>Core Data</h2>
-<table>
-    <tr>
-        <th>Name</th>
-        <th>Stars</th>
-        <th>Created</th>
-    </tr>
+        <div class="stats">
+            <div class="stat-card">
+                <div class="stat-label">Total repositories in database</div>
+                <div class="stat-value">{{ total_repos }}</div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-label">Repositories matching current filters</div>
+                <div class="stat-value">{{ total_rows }}</div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-label">Maximum stars in current dataset</div>
+                <div class="stat-value">{{ max_stars }}</div>
+            </div>
+        </div>
 
-    {% for repo in repos %}
-    <tr>
-        <td>{{ repo.namewithowner }}</td>
-        <td>{{ repo.stars }}</td>
-        <td>{{ repo.createdat }}</td>
-    </tr>
-    {% endfor %}
-</table>
+        <div class="panel">
+            <div class="panel-header">
+                <div>
+                    <div class="panel-title">Repositories</div>
+                    <div class="panel-subtitle">
+                        Showing a paginated, searchable view instead of rendering the full dataset at once.
+                    </div>
+                </div>
+            </div>
 
-<h2>Metadata</h2>
-<table>
-    <tr>
-        <th>ID</th>
-        <th>Rank</th>
-        <th>Language</th>
-        <th>Archived</th>
-        <th>Fork</th>
-    </tr>
+            <form method="get" class="filters">
+                <div class="field-group">
+                    <label for="q">Search by repository name</label>
+                    <input
+                        type="text"
+                        id="q"
+                        name="q"
+                        value="{{ query_text }}"
+                        placeholder="e.g. tensorflow, pytorch, react"
+                    >
+                </div>
 
-    {% for repo in repos %}
-    <tr>
-        <td>{{ repo.id }}</td>
-        <td>{{ repo.meta.rank }}</td>
-        <td>{{ repo.meta.language }}</td>
-        <td>{{ repo.meta.isarchived }}</td>
-        <td>{{ repo.meta.isfork }}</td>
-    </tr>
-    {% endfor %}
-</table>
+                <div class="field-group">
+                    <label for="language">Filter by language</label>
+                    <select id="language" name="language">
+                        <option value="">All languages</option>
+                        {% for lang in languages %}
+                            <option value="{{ lang }}" {% if selected_language == lang %}selected{% endif %}>
+                                {{ lang }}
+                            </option>
+                        {% endfor %}
+                    </select>
+                </div>
 
+                <button class="btn" type="submit">Apply</button>
+                <a class="btn btn-secondary" href="/">Reset</a>
+            </form>
 
+            <div class="table-wrap">
+                <table>
+                    <thead>
+                        <tr>
+                            <th>ID</th>
+                            <th>Rank</th>
+                            <th>Repository</th>
+                            <th>Stars</th>
+                            <th>Language</th>
+                            <th>Created</th>
+                            <th>Archived</th>
+                            <th>Fork</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        {% if rows %}
+                            {% for row in rows %}
+                            <tr>
+                                <td>{{ row.id }}</td>
+                                <td>{{ row.rank }}</td>
+                                <td>
+                                    <div class="repo-name">{{ row.namewithowner }}</div>
+                                </td>
+                                <td>{{ row.stars }}</td>
+                                <td>{{ row.language or "—" }}</td>
+                                <td>{{ row.createdat.strftime("%Y-%m-%d") if row.createdat else "—" }}</td>
+                                <td>
+                                    {% if row.isarchived %}
+                                        <span class="badge badge-archived">Archived</span>
+                                    {% else %}
+                                        <span class="badge badge-no">No</span>
+                                    {% endif %}
+                                </td>
+                                <td>
+                                    {% if row.isfork %}
+                                        <span class="badge badge-fork">Fork</span>
+                                    {% else %}
+                                        <span class="badge badge-no">No</span>
+                                    {% endif %}
+                                </td>
+                            </tr>
+                            {% endfor %}
+                        {% else %}
+                            <tr>
+                                <td colspan="8" class="empty-state">
+                                    No repositories found for the current filters.
+                                </td>
+                            </tr>
+                        {% endif %}
+                    </tbody>
+                </table>
+            </div>
+
+            <div class="pagination">
+                <div class="pagination-info">
+                    Page {{ page }} of {{ total_pages }} &nbsp;|&nbsp;
+                    Showing up to {{ per_page }} rows per page
+                </div>
+
+                <div class="pagination-links">
+                    {% if page > 1 %}
+                        <a class="page-link" href="/?page=1&q={{ query_text }}&language={{ selected_language }}">First</a>
+                        <a class="page-link" href="/?page={{ page - 1 }}&q={{ query_text }}&language={{ selected_language }}">Previous</a>
+                    {% endif %}
+
+                    {% if page < total_pages %}
+                        <a class="page-link" href="/?page={{ page + 1 }}&q={{ query_text }}&language={{ selected_language }}">Next</a>
+                        <a class="page-link" href="/?page={{ total_pages }}&q={{ query_text }}&language={{ selected_language }}">Last</a>
+                    {% endif %}
+                </div>
+            </div>
+        </div>
+    </div>
 </body>
 </html>
